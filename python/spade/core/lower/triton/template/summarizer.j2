@@ -1,0 +1,203 @@
+import triton
+from triton import language as tl
+
+
+@triton.jit
+def self_cos_sim(reduct_block, reduct_ret, reduct_norm, in_block):
+    in_block_t = tl.trans(in_block)
+    mtmp = tl.dot(reduct_block, in_block_t)
+    reduct_ret += tl.sum(mtmp) * 2
+
+    mtmp = tl.dot(in_block, in_block_t)
+    reduct_ret += tl.sum(mtmp)
+
+    reduct_norm += tl.sum(in_block * in_block)
+    reduct_block += in_block
+    return reduct_block, reduct_ret, reduct_norm
+
+
+@triton.jit
+def ops_min(reduct_vec, in_block, mask):
+    kBlockMin = tl.where(mask[:, None], in_block, 1e10)
+    curMin = tl.min(kBlockMin, axis=0)
+    return tl.minimum(reduct_vec, curMin)
+
+
+@triton.jit
+def ops_max(reduct_vec, in_block, mask):
+    kBlockMax = tl.where(mask[:, None], in_block, -1e10)
+    curMax = tl.max(kBlockMax, axis=0)
+    return tl.maximum(reduct_vec, curMax)
+
+
+@triton.jit
+def ops_sum(reduct_vec, in_block, mask):
+    kBlockSum = tl.where(mask[:, None], in_block, 0)
+    curSum = tl.sum(kBlockSum, axis=0)
+    return reduct_vec + curSum
+
+
+@triton.jit
+def summarize_kernel(
+    headIndices,
+    k,
+    reorder_k,
+    {% if 'max' in INTER_SUMMARIZER_MODES %}
+    blockMax,
+    {% endif %}
+    {% if 'min' in INTER_SUMMARIZER_MODES %}
+    blockMin,
+    {% endif %}
+    {% if 'mean' in INTER_SUMMARIZER_MODES %}
+    blockSum,
+    {% endif %}
+    {% if INTRA_SUMMARIZE_ENABLE %}
+    blockIntra,
+    {% endif %}
+):
+    STRIDE_K0: tl.constexpr = {{ stride_k0 }}
+    STRIDE_K1: tl.constexpr = {{ stride_k1 }}
+    STRIDE_K2: tl.constexpr = {{ stride_k2 }}
+    STRIDE_K3: tl.constexpr = {{ stride_k3 }}
+    STRIDE_REORDER_K0: tl.constexpr = {{ stride_reorder_k0 }}
+    STRIDE_REORDER_K1: tl.constexpr = {{ stride_reorder_k1 }}
+    STRIDE_REORDER_K2: tl.constexpr = {{ stride_reorder_k2 }}
+    STRIDE_REORDER_K3: tl.constexpr = {{ stride_reorder_k3 }}
+    STRIDE_REORDER_K4: tl.constexpr = {{ stride_reorder_k4 }}
+    LAYOUT: tl.constexpr = {{ layout_is_bsnh }}
+
+    {% if INTER_SUMMARIZE_ENABLE %}
+    STRIDE_LAYER0: tl.constexpr = {{ stride_layer0 }}
+    STRIDE_LAYER1: tl.constexpr = {{ stride_layer1 }}
+    STRIDE_LAYER2: tl.constexpr = {{ stride_layer2 }}
+    STRIDE_LAYER3: tl.constexpr = {{ stride_layer3 }}
+    {% endif %}
+
+    {% if INTRA_SUMMARIZE_ENABLE %}
+    STRIDE_BLOCKINTRA0: tl.constexpr = {{ stride_blockIntra0 }}
+    STRIDE_BLOCKINTRA1: tl.constexpr = {{ stride_blockIntra1 }}
+    STRIDE_BLOCKINTRA2: tl.constexpr = {{ stride_blockIntra2 }}
+    {% endif %}
+    FRAMEDIM: tl.constexpr = {{ frameDim }}
+    HEIGHTDIM: tl.constexpr = {{ heightDim }}
+    WIDTHDIM: tl.constexpr = {{ widthDim }}
+    FRAMEBLOCKSIZE: tl.constexpr = {{ frameBlockSize }}
+    HEIGHTBLOCKSIZE: tl.constexpr = {{ heightBlockSize }}
+    WIDTHBLOCKSIZE: tl.constexpr = {{ widthBlockSize }}
+    NUMFRAMEBLOCK: tl.constexpr = {{ numFrameBlock }}
+    NUMHEIGHTBLOCK: tl.constexpr = {{ numHeightBlock }}
+    NUMWIDTHBLOCK: tl.constexpr = {{ numWidthBlock }}
+    NUMHEADS: tl.constexpr = {{ numHeads }}
+    HEADDIM: tl.constexpr = {{ headDim }}
+    PADDING_VAL: tl.constexpr = {{ padding_val }}
+
+    DTYPE: tl.constexpr = k.dtype.element_ty
+    bszIdx = tl.program_id(0).to(tl.int64)
+    headListIdx = tl.program_id(1).to(tl.int64)
+    headIdx = tl.load(headIndices + headListIdx).to(tl.int64)
+    blockIdx = tl.program_id(2).to(tl.int64)
+
+    frameBlockidx = blockIdx // (NUMHEIGHTBLOCK * NUMWIDTHBLOCK)
+    heightBlockIdx = (blockIdx %
+                      (NUMHEIGHTBLOCK * NUMWIDTHBLOCK)) // NUMWIDTHBLOCK
+    widthBlockIdx = (blockIdx %
+                     (NUMHEIGHTBLOCK * NUMWIDTHBLOCK)) % NUMWIDTHBLOCK
+    tid = tl.arange(0, HEADDIM)
+    VECSIZE: tl.constexpr = triton.next_power_of_2(WIDTHBLOCKSIZE)
+    local_width_indices = tl.arange(0, VECSIZE)
+    
+    {% if 'max' in INTER_SUMMARIZER_MODES %}
+    # Max Init
+    blockMaxVector = tl.full((HEADDIM, ), -1e10, dtype=tl.float32)
+    {% endif %}
+    {% if 'min' in INTER_SUMMARIZER_MODES %}
+    blockMinVector = tl.full((HEADDIM, ), 1e10, dtype=tl.float32)
+    {% endif %}
+    {% if 'mean' in INTER_SUMMARIZER_MODES %}
+    blockSumVector = tl.zeros((HEADDIM, ), dtype=tl.float32)
+    blockCount = 0.
+    {% endif %}
+
+    {% if INTRA_SUMMARIZE_ENABLE %}
+    reduct_block = tl.zeros((VECSIZE, HEADDIM), dtype=DTYPE)
+    reduct_ret = 0.
+    reduct_norm = 0.
+    {% endif %}
+
+    for fb in tl.static_range(FRAMEBLOCKSIZE):
+        frameIdx = fb + frameBlockidx * FRAMEBLOCKSIZE
+        for hb in tl.static_range(HEIGHTBLOCKSIZE):
+            heightIdx = hb + heightBlockIdx * HEIGHTBLOCKSIZE
+            widthIdx = widthBlockIdx * WIDTHBLOCKSIZE + local_width_indices
+            valid_width = local_width_indices < WIDTHBLOCKSIZE
+            widthIdxMask = valid_width & (widthIdx < WIDTHDIM)
+
+            kIdx = (bszIdx * STRIDE_K0 +
+                    (frameIdx * HEIGHTDIM * WIDTHDIM + heightIdx * WIDTHDIM +
+                     widthIdx[:, None]) * STRIDE_K1 + headIdx * STRIDE_K2 +
+                    tid[None, :] * STRIDE_K3)
+            if frameIdx < FRAMEDIM and heightIdx < HEIGHTDIM:
+                kBlock = tl.load(k + kIdx,
+                                 mask=widthIdxMask[:, None],
+                                 other=PADDING_VAL).to(DTYPE)
+
+                {% if 'max' in INTER_SUMMARIZER_MODES %}
+                blockMaxVector = ops_max(blockMaxVector, kBlock, widthIdxMask)
+                {% endif %}
+                {% if 'min' in INTER_SUMMARIZER_MODES %}
+                blockMinVector = ops_min(blockMinVector, kBlock, widthIdxMask)
+                {% endif %}
+                {% if 'mean' in INTER_SUMMARIZER_MODES %}
+                blockSumVector = ops_sum(blockSumVector, kBlock, widthIdxMask)
+                blockCount += tl.sum(widthIdxMask.to(tl.float32))
+                {% endif %}
+
+                {% if INTRA_SUMMARIZE_ENABLE %}
+                reduct_block, reduct_ret, reduct_norm = self_cos_sim(
+                    reduct_block, reduct_ret, reduct_norm, kBlock)
+                {% endif %}
+            else:
+                kBlock = tl.full((VECSIZE, HEADDIM), PADDING_VAL, dtype=DTYPE)
+
+            bblockIdx = fb * HEIGHTBLOCKSIZE * WIDTHBLOCKSIZE + \
+                        hb * WIDTHBLOCKSIZE + \
+                        local_width_indices[:, None]
+            bblockIdx = tl.where(valid_width[:, None], bblockIdx, 0)
+
+            if LAYOUT:
+                new_kIdx = (bszIdx * STRIDE_REORDER_K0 +
+                            blockIdx * STRIDE_REORDER_K1 +
+                            bblockIdx * STRIDE_REORDER_K2 +
+                            headListIdx * STRIDE_REORDER_K3 +
+                            tid[None, :] * STRIDE_REORDER_K4)
+            else:
+                new_kIdx = (bszIdx * STRIDE_REORDER_K0 +
+                            headListIdx * STRIDE_REORDER_K1 +
+                            blockIdx * STRIDE_REORDER_K2 +
+                            bblockIdx * STRIDE_REORDER_K3 +
+                            tid[None, :] * STRIDE_REORDER_K4)
+
+            tl.store(reorder_k + new_kIdx,
+                     kBlock,
+                     mask=(local_width_indices < WIDTHBLOCKSIZE)[:, None])
+
+    {% if INTER_SUMMARIZE_ENABLE %}
+    layerIdx = (bszIdx * STRIDE_LAYER0 + headListIdx * STRIDE_LAYER1 +
+                blockIdx * STRIDE_LAYER2 + tid)
+    {% endif %}
+
+    {% if INTRA_SUMMARIZE_ENABLE %}
+    tl.store(
+        blockIntra + bszIdx * STRIDE_BLOCKINTRA0 +
+        headListIdx * STRIDE_BLOCKINTRA1 + blockIdx * STRIDE_BLOCKINTRA2,
+        reduct_ret / (reduct_norm + 1e-10))
+    {% endif %}
+    {% if 'max' in INTER_SUMMARIZER_MODES %}
+    tl.store(blockMax + layerIdx, blockMaxVector)
+    {% endif %}
+    {% if 'min' in INTER_SUMMARIZER_MODES %}
+    tl.store(blockMin + layerIdx, blockMinVector)
+    {% endif %}
+    {% if 'mean' in INTER_SUMMARIZER_MODES %}
+    tl.store(blockSum + layerIdx, blockSumVector / blockCount)
+    {% endif %}

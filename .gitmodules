@@ -1,0 +1,6 @@
+[submodule "3rdparty/ThunderKittens"]
+	path = 3rdparty/ThunderKittens
+	url = https://gitee.com/somehow6/ThunderKittens
+[submodule "3rdparty/flash-attention"]
+	path = 3rdparty/flash-attention
+	url = https://gitee.com/somehow6/flash-attention.git

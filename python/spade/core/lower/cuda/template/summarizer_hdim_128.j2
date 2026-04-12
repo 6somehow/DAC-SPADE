@@ -1,0 +1,340 @@
+#include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAStream.h>
+#include <stdint.h>
+#include <float.h>
+#include <torch/extension.h>
+
+// Dtype specific includes and definitions
+{% if DTYPE == 'bfloat16' %}
+#include <cuda_bf16.h>
+using CudaDType = __nv_bfloat16;
+using CudaDType2 = __nv_bfloat162;
+#define MAKE_CUDADTYPE2 make_bfloat162
+#define CUDADTYPE2FLOAT2 __bfloat1622float2
+#define FLOAT2CUDADTYPE_RN __float2bfloat16_rn
+#define TENSOR_DTYPE at::BFloat16
+{% elif DTYPE == 'float16' %}
+#include <cuda_fp16.h>
+using CudaDType = __half;
+using CudaDType2 = __half2;
+#define MAKE_CUDADTYPE2 make_half2
+#define CUDADTYPE2FLOAT2 __half22float2
+#define FLOAT2CUDADTYPE_RN __float2half_rn
+#define TENSOR_DTYPE at::Half
+{% endif %}
+
+#define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
+#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
+#define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
+
+// --- Template Parameters ---
+#define FRAMEDIM {{ frameDim }}
+#define HEIGHTDIM {{ heightDim }}
+#define WIDTHDIM {{ widthDim }}
+#define FRAMEBLOCKSIZE {{ frameBlockSize }}
+#define HEIGHTBLOCKSIZE {{ heightBlockSize }}
+#define WIDTHBLOCKSIZE {{ widthBlockSize }}
+#define NUMFRAMEBLOCK {{ numFrameBlock }}
+#define NUMHEIGHTBLOCK {{ numHeightBlock }}
+#define NUMWIDTHBLOCK {{ numWidthBlock }}
+#define NUM_HEADS {{ num_heads }}
+#define HEADDIM {{ headDim }}
+#define PADDING_VAL {{ padding_val }}f
+{% if CONTEXT_LEN != None %}
+#define CONTEXT_LEN {{ CONTEXT_LEN }}
+#define NUMCONTEXTBLOCK {{ NUMCONTEXTBLOCK }}
+{% endif %}
+
+// --- CUDA Constants ---
+#define WARP_SIZE 32
+#define VECTOR_SIZE 4
+#define CUDA_BLOCK_SIZE (HEADDIM / VECTOR_SIZE)
+
+// --- [Device Helper Functions] ---
+__device__ __forceinline__ float4 operator*(const float4 &a, const float4 &b) { return make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w); }
+__device__ __forceinline__ float4 operator+(const float4 &a, const float4 &b) { return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
+__device__ __forceinline__ float4 operator*(const float4 &a, float b) { return make_float4(a.x * b, a.y * b, a.z * b, a.w * b); }
+__device__ __forceinline__ float4 operator/(const float4 &a, float b) { return make_float4(a.x / b, a.y / b, a.z / b, a.w / b); }
+__device__ __forceinline__ float4 fmaxf(const float4 &a, const float4 &b) { return make_float4(fmaxf(a.x, b.x), fmaxf(a.y, b.y), fmaxf(a.z, b.z), fmaxf(a.w, b.w)); }
+__device__ __forceinline__ float4 fminf(const float4 &a, const float4 &b) { return make_float4(fminf(a.x, b.x), fminf(a.y, b.y), fminf(a.z, b.z), fminf(a.w, b.w)); }
+
+__inline__ __device__ float warpAllReduceSum(float val) {
+  #pragma unroll
+  for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+    val += __shfl_down_sync(0xffffffff, val, offset);
+  }
+  return __shfl_sync(0xffffffff, val, 0);
+}
+
+__device__ __forceinline__ void process_vector(
+    const CudaDType *x_ptr, CudaDType *reorder_x_ptr
+    {% if 'max' in INTER_SUMMARIZER_MODES %} ,float4 &localMax4 {% endif %}
+    {% if 'min' in INTER_SUMMARIZER_MODES %} ,float4 &localMin4 {% endif %}
+    {% if 'mean' in INTER_SUMMARIZER_MODES %} ,float4 &localSum4 {% endif %}
+    {% if INTRA_SUMMARIZE_ENABLE %} ,float4 &preNormSum4, float4 &cosSim4 {% endif %}
+) {
+  // Reorder X: Copy 4 values (8 bytes)
+  ((CudaDType2 *)reorder_x_ptr)[0] = ((const CudaDType2 *)x_ptr)[0];
+  ((CudaDType2 *)reorder_x_ptr)[1] = ((const CudaDType2 *)x_ptr)[1];
+
+  // Load and convert to float4 for computation
+  const CudaDType2 *x_ptr_v2 = (const CudaDType2 *)x_ptr;
+  float2 fval2_a = CUDADTYPE2FLOAT2(x_ptr_v2[0]);
+  float2 fval2_b = CUDADTYPE2FLOAT2(x_ptr_v2[1]);
+  float4 fval4 = make_float4(fval2_a.x, fval2_a.y, fval2_b.x, fval2_b.y);
+
+  {% if 'max' in INTER_SUMMARIZER_MODES %} localMax4 = fmaxf(localMax4, fval4); {% endif %}
+  {% if 'min' in INTER_SUMMARIZER_MODES %} localMin4 = fminf(localMin4, fval4); {% endif %}
+  {% if 'mean' in INTER_SUMMARIZER_MODES %} localSum4 = localSum4 + fval4; {% endif %}
+
+  {% if INTRA_SUMMARIZE_ENABLE %}
+  // Normalize the HEADDIM-sized vector across the warp for CosSim
+  float normFactor_scalar = (fval4.x * fval4.x) + (fval4.y * fval4.y) +
+                            (fval4.z * fval4.z) + (fval4.w * fval4.w);
+  float total_norm_sq = warpAllReduceSum(normFactor_scalar);
+  float norm = rsqrtf(total_norm_sq + 1e-8f);
+  float4 normVal4 = fval4 * norm;
+
+  cosSim4 = cosSim4 + preNormSum4 * normVal4 * 2.0f;
+  preNormSum4 = preNormSum4 + normVal4;
+  {% endif %}
+}
+
+__device__ __forceinline__ void pad_vector(CudaDType *reorder_x_ptr) {
+  ((CudaDType2 *)reorder_x_ptr)[0] = MAKE_CUDADTYPE2(FLOAT2CUDADTYPE_RN(PADDING_VAL), FLOAT2CUDADTYPE_RN(PADDING_VAL));
+  ((CudaDType2 *)reorder_x_ptr)[1] = MAKE_CUDADTYPE2(FLOAT2CUDADTYPE_RN(PADDING_VAL), FLOAT2CUDADTYPE_RN(PADDING_VAL));
+}
+
+__device__ __forceinline__ void store_results(
+    int64_t bszIdx, int64_t headListIdx, int64_t blockIdx_z,
+    int64_t total_num_blocks, int64_t num_head_list, int64_t tid,
+    int64_t numElements
+    {% if 'max' in INTER_SUMMARIZER_MODES %} ,const float4 &localMax4, CudaDType *blockMax {% endif %}
+    {% if 'min' in INTER_SUMMARIZER_MODES %} ,const float4 &localMin4, CudaDType *blockMin {% endif %}
+    {% if 'mean' in INTER_SUMMARIZER_MODES %} ,const float4 &localSum4, CudaDType *blockMean {% endif %}
+    {% if INTRA_SUMMARIZE_ENABLE %} ,const float4 &cosSim4, CudaDType *blockCosSim {% endif %}
+) {
+    int64_t layerIdx_base = bszIdx * num_head_list * total_num_blocks * HEADDIM +
+                          headListIdx * total_num_blocks * HEADDIM +
+                          blockIdx_z * HEADDIM;
+
+    {% if 'max' in INTER_SUMMARIZER_MODES %}
+    CudaDType *blockMax_ptr = blockMax + layerIdx_base + tid * VECTOR_SIZE;
+    ((CudaDType2 *)blockMax_ptr)[0] = MAKE_CUDADTYPE2(FLOAT2CUDADTYPE_RN(localMax4.x), FLOAT2CUDADTYPE_RN(localMax4.y));
+    ((CudaDType2 *)blockMax_ptr)[1] = MAKE_CUDADTYPE2(FLOAT2CUDADTYPE_RN(localMax4.z), FLOAT2CUDADTYPE_RN(localMax4.w));
+    {% endif %}
+
+    {% if 'min' in INTER_SUMMARIZER_MODES %}
+    CudaDType *blockMin_ptr = blockMin + layerIdx_base + tid * VECTOR_SIZE;
+    ((CudaDType2 *)blockMin_ptr)[0] = MAKE_CUDADTYPE2(FLOAT2CUDADTYPE_RN(localMin4.x), FLOAT2CUDADTYPE_RN(localMin4.y));
+    ((CudaDType2 *)blockMin_ptr)[1] = MAKE_CUDADTYPE2(FLOAT2CUDADTYPE_RN(localMin4.z), FLOAT2CUDADTYPE_RN(localMin4.w));
+    {% endif %}
+
+    {% if 'mean' in INTER_SUMMARIZER_MODES %}
+    if (numElements > 0) {
+        float4 meanVal4 = localSum4 / numElements;
+        CudaDType *blockMean_ptr = blockMean + layerIdx_base + tid * VECTOR_SIZE;
+        ((CudaDType2 *)blockMean_ptr)[0] = MAKE_CUDADTYPE2(FLOAT2CUDADTYPE_RN(meanVal4.x), FLOAT2CUDADTYPE_RN(meanVal4.y));
+        ((CudaDType2 *)blockMean_ptr)[1] = MAKE_CUDADTYPE2(FLOAT2CUDADTYPE_RN(meanVal4.z), FLOAT2CUDADTYPE_RN(meanVal4.w));
+    }
+    {% endif %}
+
+    {% if INTRA_SUMMARIZE_ENABLE %}
+    float cosSim_scalar = cosSim4.x + cosSim4.y + cosSim4.z + cosSim4.w;
+    cosSim_scalar = warpAllReduceSum(cosSim_scalar);
+    if (tid == 0) {
+        int64_t layerIdx = bszIdx * num_head_list * total_num_blocks +
+                           headListIdx * total_num_blocks + blockIdx_z;
+        if (numElements > 1) {
+            blockCosSim[layerIdx] = FLOAT2CUDADTYPE_RN(cosSim_scalar / (numElements * (numElements - 1)));
+        } else {
+            blockCosSim[layerIdx] = FLOAT2CUDADTYPE_RN(0.0f);
+        }
+    }
+    {% endif %}
+}
+
+__global__ __launch_bounds__(CUDA_BLOCK_SIZE)
+void summarize_kernel(
+    const int64_t* __restrict__ headIndices,
+    const CudaDType* __restrict__ x,
+    CudaDType* __restrict__ reorder_x,
+    {% if 'max' in INTER_SUMMARIZER_MODES %} CudaDType* __restrict__ blockMax, {% endif %}
+    {% if 'min' in INTER_SUMMARIZER_MODES %} CudaDType* __restrict__ blockMin, {% endif %}
+    {% if 'mean' in INTER_SUMMARIZER_MODES %} CudaDType* __restrict__ blockMean, {% endif %}
+    {% if INTRA_SUMMARIZE_ENABLE %} CudaDType* __restrict__ blockCosSim, {% endif %}
+    const int64_t num_head_list
+    {% if CONTEXT_LEN != None %}, const int64_t real_seqlen {% endif %}
+) {
+  // --- Setup and Constants ---
+  const int64_t bszIdx = blockIdx.x;
+  const int64_t headListIdx = blockIdx.y;
+  const int64_t blockIdx_z = blockIdx.z;
+  const int64_t tid = threadIdx.x;
+
+  constexpr int64_t num_video_blocks = NUMFRAMEBLOCK * NUMHEIGHTBLOCK * NUMWIDTHBLOCK;
+  constexpr int64_t block_size = FRAMEBLOCKSIZE * HEIGHTBLOCKSIZE * WIDTHBLOCKSIZE;
+  constexpr int64_t video_seq_len = FRAMEDIM * HEIGHTDIM * WIDTHDIM;
+  {% if CONTEXT_LEN != None %}
+  constexpr int64_t total_x_seq_len = video_seq_len + CONTEXT_LEN;
+  constexpr int64_t total_num_blocks = num_video_blocks + NUMCONTEXTBLOCK;
+  {% else %}
+  constexpr int64_t total_x_seq_len = video_seq_len;
+  constexpr int64_t total_num_blocks = num_video_blocks;
+  {% endif %}
+
+  const int64_t headIdx = headIndices[headListIdx];
+
+  // --- Main Logic: Differentiate Video and Text Blocks ---
+{% if CONTEXT_LEN != None %}
+  if (blockIdx_z < num_video_blocks) {
+{% endif %}
+    // --- [Video Block Processing] ---
+    {% if 'max' in INTER_SUMMARIZER_MODES %} float4 localMax4 = make_float4(-FLT_MAX, -FLT_MAX, -FLT_MAX, -FLT_MAX); {% endif %}
+    {% if 'min' in INTER_SUMMARIZER_MODES %} float4 localMin4 = make_float4(FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX); {% endif %}
+    {% if 'mean' in INTER_SUMMARIZER_MODES %} float4 localSum4 = make_float4(0.0f, 0.0f, 0.0f, 0.0f); {% endif %}
+    {% if INTRA_SUMMARIZE_ENABLE %}
+    float4 preNormSum4 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float4 cosSim4 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    {% endif %}
+    int64_t numElements = 0;
+
+    const int64_t frameBlockidx = blockIdx_z / (NUMHEIGHTBLOCK * NUMWIDTHBLOCK);
+    const int64_t heightBlockIdx = (blockIdx_z % (NUMHEIGHTBLOCK * NUMWIDTHBLOCK)) / NUMWIDTHBLOCK;
+    const int64_t widthBlockIdx = (blockIdx_z % (NUMHEIGHTBLOCK * NUMWIDTHBLOCK)) % NUMWIDTHBLOCK;
+
+    #pragma unroll
+    for (int64_t fb = 0; fb < FRAMEBLOCKSIZE; fb++) {
+      const int64_t frameIdx = fb + frameBlockidx * FRAMEBLOCKSIZE;
+      #pragma unroll
+      for (int64_t hb = 0; hb < HEIGHTBLOCKSIZE; hb++) {
+        const int64_t heightIdx = hb + heightBlockIdx * HEIGHTBLOCKSIZE;
+        #pragma unroll
+        for (int64_t w = 0; w < WIDTHBLOCKSIZE; w++) {
+          const int64_t widthIdx = widthBlockIdx * WIDTHBLOCKSIZE + w;
+          const int64_t bblockIdx = fb * HEIGHTBLOCKSIZE * WIDTHBLOCKSIZE + hb * WIDTHBLOCKSIZE + w;
+          {% if LAYOUT == 'bnsh' %}
+          const int64_t new_xIdx_base = bszIdx * num_head_list * total_num_blocks * block_size * HEADDIM +
+              headListIdx * total_num_blocks * block_size * HEADDIM +
+              blockIdx_z * block_size * HEADDIM + bblockIdx * HEADDIM;
+          {% else %}
+          const int64_t new_xIdx_base = bszIdx * total_num_blocks * block_size * num_head_list * HEADDIM +
+              blockIdx_z * block_size * num_head_list * HEADDIM +
+              bblockIdx * num_head_list * HEADDIM + headListIdx * HEADDIM;
+          {% endif %}
+          CudaDType *reorder_x_ptr = reorder_x + new_xIdx_base + tid * VECTOR_SIZE;
+
+          if (frameIdx < FRAMEDIM && heightIdx < HEIGHTDIM && widthIdx < WIDTHDIM) {
+            numElements++;
+            const int64_t seqIdx = frameIdx * HEIGHTDIM * WIDTHDIM + heightIdx * WIDTHDIM + widthIdx;
+            // Input x is always [B, S, N, H] regardless of output block layout.
+            const int64_t xIdx_base = bszIdx * total_x_seq_len * NUM_HEADS * HEADDIM +
+                seqIdx * NUM_HEADS * HEADDIM + headIdx * HEADDIM;
+            const CudaDType *x_ptr = x + xIdx_base + tid * VECTOR_SIZE;
+
+            process_vector(x_ptr, reorder_x_ptr
+                {% if 'max' in INTER_SUMMARIZER_MODES %} ,localMax4 {% endif %}
+                {% if 'min' in INTER_SUMMARIZER_MODES %} ,localMin4 {% endif %}
+                {% if 'mean' in INTER_SUMMARIZER_MODES %} ,localSum4 {% endif %}
+                {% if INTRA_SUMMARIZE_ENABLE %} ,preNormSum4, cosSim4 {% endif %}
+            );
+          } else {
+            pad_vector(reorder_x_ptr);
+            // Keep max/min semantics aligned with torch path where padded tokens are zeros.
+            {% if 'max' in INTER_SUMMARIZER_MODES %} localMax4 = fmaxf(localMax4, make_float4(0.0f, 0.0f, 0.0f, 0.0f)); {% endif %}
+            {% if 'min' in INTER_SUMMARIZER_MODES %} localMin4 = fminf(localMin4, make_float4(0.0f, 0.0f, 0.0f, 0.0f)); {% endif %}
+          }
+        }
+      }
+    }
+    store_results(bszIdx, headListIdx, blockIdx_z, total_num_blocks, num_head_list, tid, numElements
+        {% if 'max' in INTER_SUMMARIZER_MODES %} ,localMax4, blockMax {% endif %}
+        {% if 'min' in INTER_SUMMARIZER_MODES %} ,localMin4, blockMin {% endif %}
+        {% if 'mean' in INTER_SUMMARIZER_MODES %} ,localSum4, blockMean {% endif %}
+        {% if INTRA_SUMMARIZE_ENABLE %} ,cosSim4, blockCosSim {% endif %}
+    );
+{% if CONTEXT_LEN != None %}
+  }
+{% endif %}
+  {% if CONTEXT_LEN != None %}
+  else {
+    // --- [Text Block Processing] ---
+    const int64_t tblockIdx = blockIdx_z - num_video_blocks;
+    #pragma unroll
+    for (int64_t i = 0; i < block_size; i++) {
+      const int64_t seqIdx = video_seq_len + tblockIdx * block_size + i;
+      {% if LAYOUT == 'bnsh' %}
+      const int64_t new_xIdx_base = bszIdx * num_head_list * total_num_blocks * block_size * HEADDIM +
+          headListIdx * total_num_blocks * block_size * HEADDIM +
+          blockIdx_z * block_size * HEADDIM + i * HEADDIM;
+      {% else %}
+      const int64_t new_xIdx_base = bszIdx * total_num_blocks * block_size * num_head_list * HEADDIM +
+          blockIdx_z * block_size * num_head_list * HEADDIM +
+          i * num_head_list * HEADDIM + headListIdx * HEADDIM;
+      {% endif %}
+      CudaDType *reorder_x_ptr = reorder_x + new_xIdx_base + tid * VECTOR_SIZE;
+
+      if (seqIdx < real_seqlen) {
+        // Input x is always [B, S, N, H] regardless of output block layout.
+        const int64_t xIdx_base = bszIdx * total_x_seq_len * NUM_HEADS * HEADDIM +
+            seqIdx * NUM_HEADS * HEADDIM + headIdx * HEADDIM;
+        const CudaDType *x_ptr = x + xIdx_base + tid * VECTOR_SIZE;
+
+        ((CudaDType2 *)reorder_x_ptr)[0] = ((const CudaDType2 *)x_ptr)[0];
+        ((CudaDType2 *)reorder_x_ptr)[1] = ((const CudaDType2 *)x_ptr)[1];
+      } else {
+        pad_vector(reorder_x_ptr);
+      }
+    }
+  }
+  {% endif %}
+}
+
+// C++ wrapper function
+void summarize_forward(
+    at::Tensor head_indices, at::Tensor x, at::Tensor reorder_x
+    {% if 'max' in INTER_SUMMARIZER_MODES %}, at::Tensor block_max {% endif %}
+    {% if 'min' in INTER_SUMMARIZER_MODES %}, at::Tensor block_min {% endif %}
+    {% if 'mean' in INTER_SUMMARIZER_MODES %}, at::Tensor block_mean {% endif %}
+    {% if INTRA_SUMMARIZE_ENABLE %}, at::Tensor block_cos_sim {% endif %}
+    {% if CONTEXT_LEN != None %}, int64_t real_seqlen {% endif %}
+) {
+    CHECK_INPUT(head_indices);
+    CHECK_INPUT(x);
+    CHECK_INPUT(reorder_x);
+    {% if 'max' in INTER_SUMMARIZER_MODES %} CHECK_INPUT(block_max); {% endif %}
+    {% if 'min' in INTER_SUMMARIZER_MODES %} CHECK_INPUT(block_min); {% endif %}
+    {% if 'mean' in INTER_SUMMARIZER_MODES %} CHECK_INPUT(block_mean); {% endif %}
+    {% if INTRA_SUMMARIZE_ENABLE %} CHECK_INPUT(block_cos_sim); {% endif %}
+
+    const int64_t bsz = x.size(0);
+    const int64_t num_head_list = head_indices.size(0);
+    {% if CONTEXT_LEN != None %}
+    const int64_t num_blocks_z = NUMFRAMEBLOCK * NUMHEIGHTBLOCK * NUMWIDTHBLOCK + NUMCONTEXTBLOCK;
+    {% else %}
+    const int64_t num_blocks_z = NUMFRAMEBLOCK * NUMHEIGHTBLOCK * NUMWIDTHBLOCK;
+    {% endif %}
+
+    dim3 grid(bsz, num_head_list, num_blocks_z);
+    dim3 block(WARP_SIZE);
+    cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
+
+    summarize_kernel<<<grid, block, 0, stream>>>(
+        head_indices.data_ptr<int64_t>(),
+        (const CudaDType*)x.data_ptr<TENSOR_DTYPE>(),
+        (CudaDType*)reorder_x.data_ptr<TENSOR_DTYPE>()
+        {% if 'max' in INTER_SUMMARIZER_MODES %}, (CudaDType*)block_max.data_ptr<TENSOR_DTYPE>() {% endif %}
+        {% if 'min' in INTER_SUMMARIZER_MODES %}, (CudaDType*)block_min.data_ptr<TENSOR_DTYPE>() {% endif %}
+        {% if 'mean' in INTER_SUMMARIZER_MODES %}, (CudaDType*)block_mean.data_ptr<TENSOR_DTYPE>() {% endif %}
+        {% if INTRA_SUMMARIZE_ENABLE %}, (CudaDType*)block_cos_sim.data_ptr<TENSOR_DTYPE>() {% endif %}
+        , num_head_list
+        {% if CONTEXT_LEN != None %}, real_seqlen {% endif %}
+    );
+
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("summarize_forward", &summarize_forward, "Summarizer forward (CUDA)");
+}
