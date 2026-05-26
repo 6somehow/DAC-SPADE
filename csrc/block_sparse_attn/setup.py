@@ -40,6 +40,7 @@ def cuda_archs():
         import torch
 
         if torch.cuda.is_available():
+<<<<<<< HEAD
             major, minor = torch.cuda.get_device_capability()
             if (major, minor) == (9, 0):
                 return ["90a"]
@@ -50,6 +51,30 @@ def cuda_archs():
             if (major, minor) == (8, 0):
                 return ["80"]
             return [f"{major}{minor}"]
+=======
+            detected_archs = []
+            for device_idx in range(torch.cuda.device_count()):
+                major, minor = torch.cuda.get_device_capability(device_idx)
+                if (major, minor) == (9, 0):
+                    detected_archs.append("90a")
+                elif (major, minor) == (8, 9):
+                    detected_archs.append("89")
+                elif (major, minor) == (8, 6):
+                    detected_archs.append("86")
+                elif (major, minor) == (8, 0):
+                    detected_archs.append("80")
+                else:
+                    detected_archs.append(f"{major}{minor}")
+            if detected_archs:
+                arch_order = ["80", "86", "89", "90", "90a"]
+                detected_archs = sorted(set(detected_archs),
+                                        key=lambda arch: (
+                                            arch_order.index(arch)
+                                            if arch in arch_order else len(arch_order),
+                                            arch,
+                                        ))
+                return detected_archs
+>>>>>>> dev
     except Exception:
         pass
 
@@ -154,6 +179,18 @@ def check_required_headers():
         )
 
 
+<<<<<<< HEAD
+=======
+def cutlass_uses_tiled_mma_tile_api():
+    mma_atom = CUTLASS_ROOT / "include" / "cute" / "atom" / "mma_atom.hpp"
+    try:
+        contents = mma_atom.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "TiledMMA requires independent permutations of MNK" in contents
+
+
+>>>>>>> dev
 def cuda_driver_library_dirs():
     candidates = []
     if CUDA_HOME is not None:
@@ -246,6 +283,11 @@ if not SKIP_CUDA_BUILD:
         "--use_fast_math",
         "-DTORCH_COMPILE",
     ]
+<<<<<<< HEAD
+=======
+    if cutlass_uses_tiled_mma_tile_api():
+        nvcc_flags.append("-DBLOCK_SPARSE_ATTN_CUTLASS_TILE_API")
+>>>>>>> dev
     if enable_tk:
         nvcc_flags.extend([
             f"-I{thunderkittens_include}",
@@ -273,7 +315,15 @@ if not SKIP_CUDA_BUILD:
             name="block_sparse_attn_cuda",
             sources=extra_sources + get_generated_cuda_sources(),
             extra_compile_args={
+<<<<<<< HEAD
                 "cxx": ["-O3", "-std=c++20"] + (["-DBLOCK_SPARSE_ATTN_ENABLE_TK"] if build_tk else []),
+=======
+                "cxx": (
+                    ["-O3", "-std=c++20"]
+                    + (["-DBLOCK_SPARSE_ATTN_ENABLE_TK"] if build_tk else [])
+                    + (["-DBLOCK_SPARSE_ATTN_CUTLASS_TILE_API"] if cutlass_uses_tiled_mma_tile_api() else [])
+                ),
+>>>>>>> dev
                 "nvcc": append_nvcc_threads(nvcc_flags + cc_flag),
             },
             include_dirs=[

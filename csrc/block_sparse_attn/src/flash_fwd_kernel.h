@@ -129,7 +129,11 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     constexpr int kBlockN = Kernel_traits::kBlockN;
     constexpr int kHeadDim = Kernel_traits::kHeadDim;
     constexpr int kNWarps = Kernel_traits::kNWarps;
+<<<<<<< HEAD
     constexpr int MMA_M = kBlockM / decltype(size<0>(typename Kernel_traits::TiledMma::TiledShape_MNK{}))::value;
+=======
+    constexpr int MMA_M = kBlockM / TiledMmaTileSize<0, typename Kernel_traits::TiledMma>::value;
+>>>>>>> dev
 
     const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb);
     if (m_block * kBlockM >= binfo.actual_seqlen_q) return;
@@ -662,7 +666,11 @@ inline __device__ void compute_block_attn_1rowblock(const Params &params, const 
     constexpr int kBlockN = Kernel_traits::kBlockN;
     constexpr int kHeadDim = Kernel_traits::kHeadDim;
     constexpr int kNWarps = Kernel_traits::kNWarps;
+<<<<<<< HEAD
     constexpr int MMA_M = kBlockM / decltype(size<0>(typename Kernel_traits::TiledMma::TiledShape_MNK{}))::value;
+=======
+    constexpr int MMA_M = kBlockM / TiledMmaTileSize<0, typename Kernel_traits::TiledMma>::value;
+>>>>>>> dev
 
     const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb);
     if (m_block * kBlockM >= binfo.actual_seqlen_q) return;

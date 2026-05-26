@@ -7,6 +7,10 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
+<<<<<<< HEAD
+=======
+#include <type_traits>
+>>>>>>> dev
 
 #include <cuda_fp16.h>
 
@@ -29,6 +33,21 @@ namespace FLASH_NAMESPACE {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+<<<<<<< HEAD
+=======
+template <int I, typename TiledMMA, typename = void>
+struct TiledMmaTileSize {
+    static constexpr int value = decltype(TiledMMA{}.template tile_size_mnk<I>())::value;
+};
+
+template <int I, typename TiledMMA>
+struct TiledMmaTileSize<I, TiledMMA, std::void_t<typename TiledMMA::TiledShape_MNK>> {
+    static constexpr int value = decltype(cute::size<I>(typename TiledMMA::TiledShape_MNK{}))::value;
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+>>>>>>> dev
 template<typename T>
 __forceinline__ __device__ uint32_t relu2(const uint32_t x);
 

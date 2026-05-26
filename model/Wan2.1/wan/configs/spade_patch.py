@@ -204,15 +204,26 @@ def select_sparse_engine(backend='torch'):
     spatial_config_id1 = exec_table.register_config(spatial_config1)
     temporal_config_id0 = exec_table.register_config(temporal_config0)
     temporal_config_id1 = exec_table.register_config(temporal_config1)
+<<<<<<< HEAD
     # mixed_config_id0 = exec_table.register_config(mixed_config0)
     # mixed_config_id1 = exec_table.register_config(mixed_config1)
 
     timesteps = 40
+=======
+    mixed_config_id0 = exec_table.register_config(mixed_config0)
+    mixed_config_id1 = exec_table.register_config(mixed_config1)
+
+    timesteps = 50
+>>>>>>> dev
     num_pipelines = 2
     num_layers = 40
     num_heads = 40
 
+<<<<<<< HEAD
     start_timestep = 0
+=======
+    start_timestep = 1
+>>>>>>> dev
     start_layer = 1
 
     layout = 'bnsh'
@@ -232,7 +243,11 @@ def select_sparse_engine(backend='torch'):
                                      sparse_start_layer=start_layer,
                                      layout=layout,
                                      backend=backend,
+<<<<<<< HEAD
                                      is_record_sparse_rate=True)
+=======
+                                     is_record_sparse_rate=False)
+>>>>>>> dev
 
     print("SparseAttnEngine instantiated successfully.")
     print(f"Executor table: {exec_table}")

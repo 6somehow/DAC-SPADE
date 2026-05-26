@@ -1,6 +1,16 @@
 // modify from https://github.com/hao-ai-lab/FastVideo/blob/c591d6d2a673e717c0ddc2adb8fbaeb3db57c3df/fastvideo-kernel/csrc/attention/block_sparse_h100.cu
 
 #include <torch/extension.h>
+<<<<<<< HEAD
+=======
+#if defined(KITTENS_HOPPER) && !defined(KITTENS_BLACKWELL) && __has_include(<cuda_fp4.h>)
+#include <cuda_fp4.h>
+namespace kittens {
+using fp4_2 = __nv_fp4x2_e2m1;
+using fp4_4 = __nv_fp4x4_e2m1;
+}  // namespace kittens
+#endif
+>>>>>>> dev
 #include "kittens.cuh"
 #include <c10/cuda/CUDAGuard.h>
 #include <cooperative_groups.h>
@@ -132,9 +142,15 @@ __global__ __launch_bounds__(128, 4) void fwd_attend_ker(
 
   col_vec<rt_fl<16, 64>> max_vec, norm_vec, max_vec_last_scaled, max_vec_scaled;
 
+<<<<<<< HEAD
   neg_infty(max_vec);
   zero(norm_vec);
   zero(o_reg);
+=======
+  warp::neg_infty(max_vec);
+  warp::zero(norm_vec);
+  warp::zero(o_reg);
+>>>>>>> dev
 
   // wait for q block
   wait(qsmem_semaphore, 0);
@@ -150,6 +166,7 @@ __global__ __launch_bounds__(128, 4) void fwd_attend_ker(
     // compute QK^T
     warpgroup::mm_ABt(att_block, q_smem[0], k_smem[0]);
 
+<<<<<<< HEAD
     copy(max_vec_last_scaled, max_vec);
     if constexpr (D == 64)
     {
@@ -159,6 +176,17 @@ __global__ __launch_bounds__(128, 4) void fwd_attend_ker(
     {
       mul(max_vec_last_scaled, max_vec_last_scaled,
           1.44269504089f * 0.08838834764f);
+=======
+    warp::copy(max_vec_last_scaled, max_vec);
+    if constexpr (D == 64)
+    {
+      warp::mul(max_vec_last_scaled, max_vec_last_scaled, 1.44269504089f * 0.125f);
+    }
+    else
+    {
+      warp::mul(max_vec_last_scaled, max_vec_last_scaled,
+                1.44269504089f * 0.08838834764f);
+>>>>>>> dev
     }
 
     warpgroup::mma_async_wait();
@@ -171,6 +199,7 @@ __global__ __launch_bounds__(128, 4) void fwd_attend_ker(
       tma::load_async(k_smem[0], g.k, k_tile_idx, k_smem_arrived);
     }
 
+<<<<<<< HEAD
     row_max(max_vec, att_block, max_vec);
 
     if constexpr (D == 64)
@@ -193,6 +222,30 @@ __global__ __launch_bounds__(128, 4) void fwd_attend_ker(
     add(att_block, att_block, 0.f);
     copy(att_block_mma, att_block);
     mul_row(o_reg, o_reg, max_vec_last_scaled);
+=======
+    warp::row_max(max_vec, att_block, max_vec);
+
+    if constexpr (D == 64)
+    {
+      warp::mul(att_block, att_block, 1.44269504089f * 0.125f);
+      warp::mul(max_vec_scaled, max_vec, 1.44269504089f * 0.125f);
+    }
+    else
+    {
+      warp::mul(att_block, att_block, 1.44269504089f * 0.08838834764f);
+      warp::mul(max_vec_scaled, max_vec, 1.44269504089f * 0.08838834764f);
+    }
+
+    warp::sub_row(att_block, att_block, max_vec_scaled);
+    warp::exp2(att_block, att_block);
+    warp::sub(max_vec_last_scaled, max_vec_last_scaled, max_vec_scaled);
+    warp::exp2(max_vec_last_scaled, max_vec_last_scaled);
+    warp::mul(norm_vec, norm_vec, max_vec_last_scaled);
+    warp::row_sum(norm_vec, att_block, norm_vec);
+    warp::add(att_block, att_block, 0.f);
+    warp::copy(att_block_mma, att_block);
+    warp::mul_row(o_reg, o_reg, max_vec_last_scaled);
+>>>>>>> dev
 
     // wait v
     wait(v_smem_arrived, kv_idx % 2);
@@ -219,6 +272,7 @@ __global__ __launch_bounds__(128, 4) void fwd_attend_ker(
     // compute QK^T
     warpgroup::mm_ABt(att_block, q_smem[0], k_smem[0]);
 
+<<<<<<< HEAD
     copy(max_vec_last_scaled, max_vec);
     if constexpr (D == 64)
     {
@@ -228,10 +282,22 @@ __global__ __launch_bounds__(128, 4) void fwd_attend_ker(
     {
       mul(max_vec_last_scaled, max_vec_last_scaled,
           1.44269504089f * 0.08838834764f);
+=======
+    warp::copy(max_vec_last_scaled, max_vec);
+    if constexpr (D == 64)
+    {
+      warp::mul(max_vec_last_scaled, max_vec_last_scaled, 1.44269504089f * 0.125f);
+    }
+    else
+    {
+      warp::mul(max_vec_last_scaled, max_vec_last_scaled,
+                1.44269504089f * 0.08838834764f);
+>>>>>>> dev
     }
 
     warpgroup::mma_async_wait();
 
+<<<<<<< HEAD
     row_max(max_vec, att_block, max_vec);
 
     if constexpr (D == 64)
@@ -254,6 +320,30 @@ __global__ __launch_bounds__(128, 4) void fwd_attend_ker(
     add(att_block, att_block, 0.f);
     copy(att_block_mma, att_block);
     mul_row(o_reg, o_reg, max_vec_last_scaled);
+=======
+    warp::row_max(max_vec, att_block, max_vec);
+
+    if constexpr (D == 64)
+    {
+      warp::mul(att_block, att_block, 1.44269504089f * 0.125f);
+      warp::mul(max_vec_scaled, max_vec, 1.44269504089f * 0.125f);
+    }
+    else
+    {
+      warp::mul(att_block, att_block, 1.44269504089f * 0.08838834764f);
+      warp::mul(max_vec_scaled, max_vec, 1.44269504089f * 0.08838834764f);
+    }
+
+    warp::sub_row(att_block, att_block, max_vec_scaled);
+    warp::exp2(att_block, att_block);
+    warp::sub(max_vec_last_scaled, max_vec_last_scaled, max_vec_scaled);
+    warp::exp2(max_vec_last_scaled, max_vec_last_scaled);
+    warp::mul(norm_vec, norm_vec, max_vec_last_scaled);
+    warp::row_sum(norm_vec, att_block, norm_vec);
+    warp::add(att_block, att_block, 0.f);
+    warp::copy(att_block_mma, att_block);
+    warp::mul_row(o_reg, o_reg, max_vec_last_scaled);
+>>>>>>> dev
 
     // wait v
     wait(v_smem_arrived, kv_idx % 2);
@@ -263,7 +353,11 @@ __global__ __launch_bounds__(128, 4) void fwd_attend_ker(
     warpgroup::mma_async_wait();
   }
 
+<<<<<<< HEAD
   div_row(o_reg, o_reg, norm_vec);
+=======
+  warp::div_row(o_reg, o_reg, norm_vec);
+>>>>>>> dev
   warpgroup::store(o_smem[0], o_reg);
   __syncthreads();
 
@@ -274,6 +368,7 @@ __global__ __launch_bounds__(128, 4) void fwd_attend_ker(
     tma::store_async(g.o, o_smem[0], o_tile_idx);
   }
 
+<<<<<<< HEAD
   mul(max_vec_scaled, max_vec_scaled, 0.69314718056f);
   log(norm_vec, norm_vec);
   add(norm_vec, norm_vec, max_vec_scaled);
@@ -285,6 +380,19 @@ __global__ __launch_bounds__(128, 4) void fwd_attend_ker(
   else
   {
     mul(norm_vec, norm_vec, -11.313708499f);
+=======
+  warp::mul(max_vec_scaled, max_vec_scaled, 0.69314718056f);
+  warp::log(norm_vec, norm_vec);
+  warp::add(norm_vec, norm_vec, max_vec_scaled);
+
+  if constexpr (D == 64)
+  {
+    warp::mul(norm_vec, norm_vec, -8.0f);
+  }
+  else
+  {
+    warp::mul(norm_vec, norm_vec, -11.313708499f);
+>>>>>>> dev
   }
 
   warpgroup::store(l_smem[0], norm_vec);
@@ -366,11 +474,19 @@ __global__ __launch_bounds__(
   }
 
   wait(smem_semaphore, 0);
+<<<<<<< HEAD
   load(o_reg, o_smem[warpid]);
   load(og_reg, og_smem[warpid]);
   mul(og_reg, og_reg, o_reg);
   row_sum(d_reg, og_reg);
   store(d_smem[warpid], d_reg);
+=======
+  warp::load(o_reg, o_smem[warpid]);
+  warp::load(og_reg, og_smem[warpid]);
+  warp::mul(og_reg, og_reg, o_reg);
+  warp::row_sum(d_reg, og_reg);
+  warp::store(d_smem[warpid], d_reg);
+>>>>>>> dev
   __syncthreads();
 
   if (warpid == 0)

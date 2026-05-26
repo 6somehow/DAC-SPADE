@@ -110,6 +110,7 @@ def load_extension(required: bool = False) -> ModuleType | None:
         return _extension_module
 
     _preload_cuda_driver()
+<<<<<<< HEAD
     try:
         _extension_module = _import_extension()
         return _extension_module
@@ -120,6 +121,8 @@ def load_extension(required: bool = False) -> ModuleType | None:
     except ImportError as exc:
         _extension_error = exc
 
+=======
+>>>>>>> dev
     for candidate in _candidate_paths():
         spec = importlib.util.spec_from_file_location(_EXTENSION_NAME, candidate)
         if spec is None or spec.loader is None:
@@ -141,6 +144,19 @@ def load_extension(required: bool = False) -> ModuleType | None:
         _extension_module = module
         return module
 
+<<<<<<< HEAD
+=======
+    try:
+        _extension_module = _import_extension()
+        return _extension_module
+    except ModuleNotFoundError as exc:
+        if exc.name != _EXTENSION_NAME:
+            raise
+        _extension_error = exc
+    except ImportError as exc:
+        _extension_error = exc
+
+>>>>>>> dev
     if required:
         if _extension_error is not None and not isinstance(_extension_error, ModuleNotFoundError):
             raise ImportError(

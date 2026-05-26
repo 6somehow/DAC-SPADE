@@ -138,6 +138,23 @@ def _check_bnsh_block_dims(m_block_dim, n_block_dim):
         )
 
 
+<<<<<<< HEAD
+=======
+def _arch_mismatch_error_message(device) -> str:
+    capability = torch.cuda.get_device_capability(device)
+    arch = f"{capability[0]}{capability[1]}"
+    if capability == (9, 0):
+        arch = "90a"
+    return (
+        "The loaded block_sparse_attn native extension does not contain a usable "
+        f"kernel image for the active GPU (sm{arch}). Rebuild "
+        "block_sparse_attn_cuda with BLOCK_SPARSE_ATTN_CUDA_ARCHS including this "
+        "architecture. For mixed A100/4090/H100 nodes, rebuild with something like "
+        '`BLOCK_SPARSE_ATTN_CUDA_ARCHS="80;89;90a"`.'
+    )
+
+
+>>>>>>> dev
 def block_sparse_attn_func_bnsh(
     q,
     k,
@@ -203,6 +220,7 @@ def block_sparse_attn_func_bnsh(
         streaming_info = maybe_contiguous(streaming_info.to(dtype=torch.int32))
 
     ext = _get_block_sparse_extension(required=True)
+<<<<<<< HEAD
     kernel_ret = ext.fwd_bnsh(
         maybe_contiguous(q),
         maybe_contiguous(k),
@@ -223,4 +241,31 @@ def block_sparse_attn_func_bnsh(
         False,
         None,
     )
+=======
+    try:
+        kernel_ret = ext.fwd_bnsh(
+            maybe_contiguous(q),
+            maybe_contiguous(k),
+            maybe_contiguous(v),
+            head_mask_type,
+            streaming_info,
+            row_blockmask,
+            max_seqlen_q_,
+            max_seqlen_k_,
+            p_dropout,
+            softmax_scale,
+            is_causal,
+            window_size_left,
+            window_size_right,
+            m_block_dim,
+            n_block_dim,
+            exact_streaming,
+            False,
+            None,
+        )
+    except Exception as exc:
+        if "no kernel image is available for execution on the device" in str(exc):
+            raise RuntimeError(_arch_mismatch_error_message(q.device)) from exc
+        raise
+>>>>>>> dev
     return _extract_out_from_bnsh_return(kernel_ret)

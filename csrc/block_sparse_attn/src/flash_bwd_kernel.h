@@ -36,11 +36,20 @@ CUTE_HOST_DEVICE
 auto
 make_tiled_copy_B_warpcontiguousN(Copy_Atom<Args...> const& copy_atom,
                                   TiledMMA           const& tiled_mma) {
+<<<<<<< HEAD
     using TileShape_MNK = typename TiledMMA::TiledShape_MNK;
     using AtomShape_MNK = typename TiledMMA::AtomShape_MNK;
     constexpr int AtomShape_N = decltype(size<1>(AtomShape_MNK{}))::value;
     // Divide by 2 because right now we always use 2 for the ValLayout
     constexpr int kNWarpsN = decltype(size<1>(TileShape_MNK{}))::value / AtomShape_N / 2;
+=======
+    constexpr int TileShape_N = TiledMmaTileSize<1, TiledMMA>::value;
+    constexpr int TileShape_K = TiledMmaTileSize<2, TiledMMA>::value;
+    using AtomShape_MNK = typename TiledMMA::AtomShape_MNK;
+    constexpr int AtomShape_N = decltype(size<1>(AtomShape_MNK{}))::value;
+    // Divide by 2 because right now we always use 2 for the ValLayout
+    constexpr int kNWarpsN = TileShape_N / AtomShape_N / 2;
+>>>>>>> dev
     constexpr int MMAStride_N = MMA_N * AtomShape_N * 2;
     // This gives the correct layout, idk why.
     // auto t = make_tile(Layout<Shape<Shape<_8, _2>, _2>,
@@ -49,7 +58,11 @@ make_tiled_copy_B_warpcontiguousN(Copy_Atom<Args...> const& copy_atom,
     //                           Stride<_1, _64, _8> >{},
     auto t = make_tile(Layout<Shape<Int<AtomShape_N>, Int<kNWarpsN>, _2>,   // (8, 2, 2) or (8, 4, 2)
                               Stride<_1, Int<MMAStride_N>, _8> >{},       // (1, 64, 8) or (1, 32, 8)
+<<<<<<< HEAD
                        make_layout(size<2>(TileShape_MNK{})));
+=======
+                       make_layout(Int<TileShape_K>{}));
+>>>>>>> dev
     // if (cute::thread0()) {printf("make_tiled_copy_B_warpcontiguousN "); print(t); printf("\n");  }
     return make_tiled_copy_impl(copy_atom, tiled_mma.get_layoutB_TV(), t);
 }
@@ -63,6 +76,7 @@ CUTE_HOST_DEVICE
 auto
 make_tiled_copy_C_warpcontiguousN(Copy_Atom<Args...> const& copy_atom,
                                   TiledMMA           const& tiled_mma) {
+<<<<<<< HEAD
     using TileShape_MNK = typename TiledMMA::TiledShape_MNK;
     using AtomShape_MNK = typename TiledMMA::AtomShape_MNK;
     constexpr int AtomShape_N = decltype(size<1>(AtomShape_MNK{}))::value;
@@ -70,6 +84,16 @@ make_tiled_copy_C_warpcontiguousN(Copy_Atom<Args...> const& copy_atom,
     constexpr int kNWarpsN = decltype(size<1>(TileShape_MNK{}))::value / AtomShape_N / 2;
     constexpr int MMAStride_N = MMA_N * AtomShape_N * 2;
     auto t = make_tile(make_layout(size<0>(TileShape_MNK{})),
+=======
+    constexpr int TileShape_M = TiledMmaTileSize<0, TiledMMA>::value;
+    constexpr int TileShape_N = TiledMmaTileSize<1, TiledMMA>::value;
+    using AtomShape_MNK = typename TiledMMA::AtomShape_MNK;
+    constexpr int AtomShape_N = decltype(size<1>(AtomShape_MNK{}))::value;
+    // Divide by 2 because right now we always use 2 for the ValLayout
+    constexpr int kNWarpsN = TileShape_N / AtomShape_N / 2;
+    constexpr int MMAStride_N = MMA_N * AtomShape_N * 2;
+    auto t = make_tile(make_layout(Int<TileShape_M>{}),
+>>>>>>> dev
                        Layout<Shape<Int<AtomShape_N>, Int<kNWarpsN>, _2>,   // (8, 2, 2) or (8, 4, 2)
                               Stride<_1, Int<MMAStride_N>, _8> >{});       // (1, 64, 8) or (1, 32, 8)
     // if (cute::thread0()) {printf("make_tiled_copy_C_warpcontiguousN "); print(t); printf("\n");  }
@@ -451,7 +475,11 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     constexpr int kBlockN = Kernel_traits::kBlockN;
     constexpr int kHeadDim = Kernel_traits::kHeadDim;
     // constexpr int kNWarps = Kernel_traits::kNWarps;
+<<<<<<< HEAD
     constexpr int MMA_N_SdP = kBlockN / decltype(size<1>(typename Kernel_traits::TiledMmaSdP::TiledShape_MNK{}))::value;
+=======
+    constexpr int MMA_N_SdP = kBlockN / TiledMmaTileSize<1, typename Kernel_traits::TiledMmaSdP>::value;
+>>>>>>> dev
     constexpr int AtomLayoutMS = Kernel_traits::AtomLayoutMSdP;
     constexpr bool Double_buffer = !Kernel_traits::No_double_buffer;
 
@@ -1158,7 +1186,11 @@ inline __device__ void compute_block_dq_dk_dv_1colblock(const Params &params, co
     constexpr int kBlockN = Kernel_traits::kBlockN;
     constexpr int kHeadDim = Kernel_traits::kHeadDim;
     // constexpr int kNWarps = Kernel_traits::kNWarps;
+<<<<<<< HEAD
     constexpr int MMA_N_SdP = kBlockN / decltype(size<1>(typename Kernel_traits::TiledMmaSdP::TiledShape_MNK{}))::value;
+=======
+    constexpr int MMA_N_SdP = kBlockN / TiledMmaTileSize<1, typename Kernel_traits::TiledMmaSdP>::value;
+>>>>>>> dev
     constexpr int AtomLayoutMS = Kernel_traits::AtomLayoutMSdP;
     constexpr bool Double_buffer = !Kernel_traits::No_double_buffer;
 
